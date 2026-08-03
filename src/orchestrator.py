@@ -49,17 +49,24 @@ class Orchestrator:
     def size(self):
        return sum(len(v) for v in self.buffer.values())
 
-    def bootstrap_system(self, intents=None):
+    def bootstrap_system(self, intents=None, use_clinc_dataset=False, 
+                        dataset_path="datasets/clinic150/data/data_full.json", 
+                        enable_augmentation=True, max_samples_per_intent=None):
         if not intents and getattr(self.student, "is_trained", False):
             print("Orchestrator: Student already trained. Skipping bootstrap.")
             return 0
 
+        # اگر از دیتاست CLINC150 استفاده شود
+        if use_clinc_dataset:
+            return self._bootstrap_with_clinc_dataset(dataset_path, enable_augmentation, max_samples_per_intent)
+        
+        # Bootstrap استاندارد با داده‌های مصنوعی
         print("Orchestrator: Cold start. Generating synthetic data...")
         all_data = []
         
         intents_source = self._resolve_intents(intents)
         self.teacher.intents = intents_source
-        use_local_augmentation = getattr(Config, "USE_LOCAL_AUGMENTATION", False)
+        use_local_augmentation = getattr(Config, "USE_LOCAL_AUGMENTATION", False) if enable_augmentation else False
         
         for intent in intents_source:
             print(f"  Generating: {intent['title']}...")
@@ -268,12 +275,154 @@ class Orchestrator:
         except Exception as e:
             print(f"Orchestrator: Save error: {e}")
     
+    def _bootstrap_with_clinc_dataset(self, dataset_path, enable_augmentation=True, max_samples_per_intent=None):
+        """Bootstrap با استفاده از دیتاست CLINC150"""
+        import json
+        
+        print(f"Orchestrator: Loading CLINC150 dataset from {dataset_path}...")
+        
+        try:
+            with open(dataset_path, 'r', encoding='utf-8') as f:
+                dataset = json.load(f)
+            
+            all_data = []
+            intents_info = []
+            
+            # پردازش هر اینتنت
+            for intent_name, samples in dataset.items():
+                if 'oos' in intent_name.lower():
+                    # نمونه‌های OOS را در فاز اول استفاده نمی‌کنیم
+                    continue
+                    
+                # محدود کردن تعداد نمونه‌ها در صورت نیاز
+                if max_samples_per_intent:
+                    samples = samples[:max_samples_per_intent]
+                
+                # تبدیل داده‌ها به فرمت مورد نیاز
+                intent_data = []
+                for sample in samples:
+                    if isinstance(sample, list) and len(sample) == 2:
+                        text, label = sample
+                        intent_data.append({
+                            'text': text,
+                            'label': label
+                        })
+                
+                if intent_data:
+                    all_data.extend(intent_data)
+                    intents_info.append({
+                        'title': intent_name,
+                        'description': f'CLINC150 intent: {intent_name}',
+                        'seeds': [intent_data[0]['text']] if intent_data else []
+                    })
+            
+            print(f"Orchestrator: Loaded {len(all_data)} samples from {len(intents_info)} intents")
+            
+            # تنظیم اطلاعات اینتنت‌ها برای Teacher
+            self.teacher.intents = intents_info
+            
+            # اگر augmentation فعال باشد، داده‌های اضافی تولید کنیم
+            if enable_augmentation and hasattr(Config, 'BOOTSTRAP_SAMPLES_PER_INTENT') and Config.BOOTSTRAP_SAMPLES_PER_INTENT > len(all_data) // len(intents_info):
+                additional_data = []
+                samples_needed_per_intent = Config.BOOTSTRAP_SAMPLES_PER_INTENT - (len(all_data) // len(intents_info))
+                
+                for intent_info in intents_info:
+                    if samples_needed_per_intent > 0:
+                        intent_samples = [d for d in all_data if d['label'] == intent_info['title']]
+                        if intent_samples:
+                            # تولید داده‌های مصنوعی با استفاده از Teacher
+                            batch = self.teacher.generate_intent_data_batch(
+                                intent_name=intent_info['title'],
+                                description=intent_info['description'],
+                                seeds=[s['text'] for s in intent_samples[:3]],  # استفاده از 3 نمونه اول به عنوان seeds
+                                total_count=samples_needed_per_intent,
+                            )
+                            additional_data.extend(batch)
+                
+                all_data.extend(additional_data)
+                print(f"Orchestrator: Generated {len(additional_data)} additional samples via augmentation")
+            
+            # ذخیره داده‌های آموزشی
+            self._save_training_data(all_data)
+            
+            # آموزش مدل Student
+            print(f"Orchestrator: Training on {len(all_data)} CLINC150 samples...")
+            with self.model_lock:
+                self.student.train_on_data(all_data)
+                self._save_model()
+            
+            # مقداردهی اولیه Replay Buffer
+            for item in all_data:
+                self.replay_buffer.add(item["text"], item["label"])
+            
+            # محاسبه Fisher برای EWC
+            self.ewc.compute_fisher(self.student, all_data)
+            
+            print(f"Orchestrator: CLINC150 bootstrap complete. {len(all_data)} samples.")
+            return len(all_data)
+            
+        except FileNotFoundError:
+            print(f"Orchestrator: Dataset file not found at {dataset_path}")
+            return 0
+        except Exception as e:
+            print(f"Orchestrator: Error loading CLINC150 dataset: {e}")
+            import traceback
+            traceback.print_exc()
+            return 0
+    
     def _save_model(self):
         try:
             os.makedirs(os.path.dirname(Config.MODEL_SAVE_PATH), exist_ok=True)
             torch.save(self.student.state_dict(), Config.MODEL_SAVE_PATH)
         except Exception as e:
             print(f"Orchestrator: Model save error: {e}")
+    
+    def retrain_student(self):
+        """
+        تابع برای retrain دستی مدل Student با استفاده از داده‌های جمع‌آوری شده
+        این تابع برای Active Learning در UI استفاده می‌شود
+        """
+        try:
+            # دریافت داده‌های جدید از accumulator
+            new_data = self.accumulator.flush()
+            if not new_data:
+                print("Orchestrator: No new data for retraining.")
+                return 0
+            
+            print(f"Orchestrator: Manual retraining on {len(new_data)} new samples...")
+            
+            # نمونه‌برداری از replay buffer
+            replay_count = int(len(new_data) * Config.REPLAY_RATIO)
+            replay_data = self.replay_buffer.sample(
+                k=replay_count, 
+                strategy="balanced"
+            )
+            
+            # ترکیب داده‌ها
+            training_batch = new_data + replay_data
+            import random
+            random.shuffle(training_batch)
+            
+            print(f"Orchestrator: Training batch: {len(new_data)} new + {len(replay_data)} replay = {len(training_batch)} total")
+            
+            # آموزش مدل
+            with self.model_lock:
+                self.student.train_on_data(training_batch)
+                self._save_model()
+            
+            # به‌روزرسانی Fisher برای EWC
+            self.ewc.compute_fisher(self.student, training_batch)
+            
+            self.metrics["retrain_count"] += 1
+            print(f"Orchestrator: Manual retraining complete. Trained on {len(training_batch)} samples.")
+            
+            return len(training_batch)
+            
+        except Exception as e:
+            print(f"Orchestrator: Error during manual retraining: {e}")
+            import traceback
+            traceback.print_exc()
+            return 0
     
     def get_metrics(self):
         fallback_rate = (self.metrics["teacher_fallbacks"] / 
