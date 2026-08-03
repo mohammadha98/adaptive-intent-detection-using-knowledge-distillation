@@ -7,7 +7,7 @@ import random
 import torch
 from src.student_model import BERTClassifier
 from src.teacher_llm import TeacherAgent
-from src.local_augmenter import LocalAugmenter
+# from src.local_augmenter import LocalAugmenter
 from src.replay_buffer import ReplayBuffer
 from src.EWCRegularizer import EWCRegularizer
 from src.SmartBatchAccumulator import SmartBatchAccumulator
@@ -19,7 +19,7 @@ class Orchestrator:
         # Core Components
         self.student = BERTClassifier()
         self.teacher = TeacherAgent()
-        self.augmenter = LocalAugmenter(device=Config.AUGMENTER_DEVICE)
+        # self.augmenter = LocalAugmenter(device=Config.AUGMENTER_DEVICE)
         
         # AOCL Components (اضافه شده)
         self.replay_buffer = ReplayBuffer(max_size=Config.REPLAY_BUFFER_SIZE)
@@ -66,7 +66,7 @@ class Orchestrator:
         
         intents_source = self._resolve_intents(intents)
         self.teacher.intents = intents_source
-        use_local_augmentation = getattr(Config, "USE_LOCAL_AUGMENTATION", False) if enable_augmentation else False
+        use_local_augmentation = False
         
         for intent in intents_source:
             print(f"  Generating: {intent['title']}...")
@@ -196,15 +196,15 @@ class Orchestrator:
             with self.model_lock:
                 shadow = copy.deepcopy(self.student)
             
-            # # 5. Incremental train with EWC
-            # shadow.incremental_train(
-            #     data=training_batch,
-            #     ewc_regularizer=self.ewc,
-            #     epochs=Config.INCREMENTAL_EPOCHS,
-            #     lr=Config.INCREMENTAL_LR
-            # )
-            # بعد (کار میکنه ولی بدون EWC):
-            shadow.train_on_data(training_batch)
+            # 5. Incremental train with EWC
+            shadow.incremental_train(
+                data=training_batch,
+                ewc_regularizer=self.ewc,
+                epochs=Config.INCREMENTAL_EPOCHS,
+                lr=Config.INCREMENTAL_LR
+            )
+            # # بعد (کار میکنه ولی بدون EWC):
+            # shadow.train_on_data(training_batch)
             
             # 6. Validate before swap (optional but recommended)
             if self._validate_shadow(shadow):

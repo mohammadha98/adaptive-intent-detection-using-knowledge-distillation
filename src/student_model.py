@@ -117,6 +117,75 @@ class BERTClassifier(nn.Module):
         self.is_trained = True
         print("StudentModel: Training & Centroid Calculation finished.")
 
+    def incremental_train(self, data, ewc_regularizer, epochs=3, lr=2e-5):
+        """آموزش پیوسته با استفاده از EWC regularizer"""
+        if not self.is_trained:
+            # اگر مدل هنوز آموزش ندیده، از آموزش عادی استفاده کن
+            return self.train_on_data(data)
+
+        print(f"StudentModel: Starting incremental training with EWC on {len(data)} samples...")
+        
+        # 1. آماده‌سازی داده‌ها
+        # از `label_map` موجود برای سازگاری استفاده می‌شود
+        texts = [d['text'] for d in data]
+        labels = [self.label2id[d['label']] for d in data if d['label'] in self.label2id]
+        
+        # اگر لیبل جدیدی وجود داشت، باید classifier head را گسترش داد
+        # (این بخش برای سادگی در این تسک نادیده گرفته شده است)
+
+        encodings = self.tokenizer(texts, truncation=True, padding=True, max_length=64)
+        dataset = SimpleDataset(encodings, labels)
+        loader = DataLoader(dataset, batch_size=8, shuffle=True)
+
+        # 2. حلقه آموزش
+        optimizer = torch.optim.AdamW(self.parameters(), lr=lr)
+        loss_fn = nn.CrossEntropyLoss()
+        
+        self.train()
+        for epoch in range(epochs):
+            for batch in loader:
+                optimizer.zero_grad()
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
+                
+                logits, _ = self(input_ids, attention_mask)
+                
+                # محاسبه لاس اصلی
+                classification_loss = loss_fn(logits, labels)
+                
+                # محاسبه و اضافه کردن EWC loss
+                ewc_loss = ewc_regularizer.penalty(self)
+                total_loss = classification_loss + ewc_loss
+                
+                if epoch == 0 and random.random() < 0.1: # لاگ‌گیری پراکنده
+                    print(f"  [Incremental Train] Classification Loss: {classification_loss.item():.4f}, EWC Loss: {ewc_loss.item():.4f}, Total Loss: {total_loss.item():.4f}")
+
+                total_loss.backward()
+                optimizer.step()
+
+        # 3. به‌روزرسانی سانترویدها (مهم)
+        self.eval()
+        # (کد محاسبه سانترویدها از train_on_data کپی و استفاده می‌شود)
+        class_embeddings = {i: [] for i in range(len(self.label_map))}
+        with torch.no_grad():
+            full_loader = DataLoader(dataset, batch_size=16)
+            for batch in full_loader:
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+                labels = batch['labels'].to(self.device)
+                _, embeddings = self(input_ids, attention_mask)
+                for i, label_idx in enumerate(labels):
+                    if label_idx.item() in class_embeddings:
+                        class_embeddings[label_idx.item()].append(embeddings[i].cpu())
+
+        for label_idx, emb_list in class_embeddings.items():
+            if emb_list:
+                mean_emb = torch.stack(emb_list).mean(dim=0)
+                self.centroids[label_idx] = F.normalize(mean_emb, p=2, dim=0).to(self.device)
+
+        print("StudentModel: Incremental Training & Centroid Update finished.")
+
     def predict(self, text, temperature=1.0):
         if not self.is_trained:
             return ("Untrained", 0.0)
