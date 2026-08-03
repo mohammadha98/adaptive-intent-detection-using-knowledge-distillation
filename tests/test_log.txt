@@ -1,0 +1,17 @@
+2025-12-30 23:59:10,204 - === TEST START: Active Learning Loop ===
+2025-12-30 23:59:10,205 - Step 1: Initializing Orchestrator & Bootstrapping...
+2025-12-30 23:59:16,396 - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-12-30 23:59:20,757 - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-12-30 23:59:29,737 - 
+Step 2: Sending Hard Query: 'I want to cook a delicious dinner for my family'
+2025-12-30 23:59:31,277 - HTTP Request: POST https://api.openai.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-12-30 23:59:31,283 - Result 1: {'label': 'recipe', 'confidence': 1.0, 'source': 'teacher', 'color': 'orange'}
+2025-12-30 23:59:31,283 - PASS: System correctly fell back to Teacher.
+2025-12-30 23:59:31,284 - 
+Step 3: Triggering Retraining (Active Learning)...
+2025-12-30 23:59:39,882 - 
+Step 4: Sending Same Query Again: 'I want to cook a delicious dinner for my family'
+2025-12-30 23:59:39,914 - Result 2: {'label': 'recipe', 'confidence': 0.8212, 'source': 'student', 'color': 'green'}
+2025-12-30 23:59:39,914 - PASS: Student successfully learned the new query!
+2025-12-30 23:59:39,915 - 
+=== TEST END ===
